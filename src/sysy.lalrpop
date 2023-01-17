@@ -1,0 +1,65 @@
+use crate::frontend::ast::{ CompUnit, FuncDef, FuncType, Block, Stmt, Exp, UnaryExp, PrimaryExp, UnaryOp };
+
+// lalrpop 里的约定
+grammar;
+
+// 约束 lexer 的行为
+match {
+  // 跳过空白符和注释
+  r"\s*" => {},
+  r"//[^\n\r]*[\n\r]*" => {},
+  // 跳过 /* */ 多行注释
+  r"/\*[\s\S]*\*/" => {},
+  // 剩下的情况采用默认方式处理
+  _
+}
+
+// 定义 CompUnit, 其返回值类型为 String
+// parser 在解析完成后的行为是返回 FuncDef 的值
+pub CompUnit: CompUnit = <func_def: FuncDef> => CompUnit { <> };
+
+// 同上, 不解释
+FuncDef: FuncDef = {
+  <func_type: FuncType> <id: Ident> "(" ")" <block: Block> => {
+    FuncDef { func_type, ident: id, block }
+  }
+}
+
+FuncType: FuncType = "int" => FuncType::Int;
+
+Block: Block = "{" <stmt: Stmt> "}" => Block { <> };
+
+Stmt: Stmt = "return" <exp: Exp> ";" => Stmt { <> };
+
+Exp: Exp = <unary_exp: UnaryExp> => Exp { unary_exp };
+
+UnaryExp: UnaryExp = {
+    <exp: PrimaryExp> => UnaryExp::PrimaryExpression(exp),
+    // + 的一元运算什么都不做
+    "+" <exp: PrimaryExp> => UnaryExp::PrimaryExpression(exp),
+    <op: UnaryOp> <exp: UnaryExp> => UnaryExp::UnaryOpAndExp(op, Box::new(exp))
+}
+
+UnaryOp: UnaryOp = {
+    "-" => UnaryOp::Neg,
+    "!" => UnaryOp::Not
+}
+
+PrimaryExp: PrimaryExp = {
+    "(" <exp: Exp> ")" => PrimaryExp::Expression(Box::new(exp)),
+    <number: Number> => PrimaryExp::Number(number)
+}
+
+Number: i32 = <num: IntConst> => num;
+
+// 如果匹配到标识符, 就返回这个字符串
+// 一对尖括号在此处指代的是正则表达式匹配到的字符串 (&str)
+// 关于尖括号到底代表什么, 请 RTFM
+Ident: String = r"[_a-zA-Z][_a-zA-Z0-9]*" => <>.to_string();
+
+// 对整数字面量的处理方式: 把匹配到的字符串按对应进制转换成数字
+IntConst: i32 = {
+  r"[1-9][0-9]*" => i32::from_str_radix(<>, 10).unwrap(),
+  r"0[0-7]*" => i32::from_str_radix(<>, 8).unwrap(),
+  r"0[xX][0-9a-fA-F]+" => i32::from_str_radix(&<>[2..], 16).unwrap(),
+}
