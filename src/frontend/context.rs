@@ -1,5 +1,6 @@
 use koopa::ir::{BasicBlock, Function, Program, Value};
 use koopa::ir::builder::{BasicBlockBuilder, LocalBuilder};
+use koopa::ir::entities::ValueData;
 
 // 在生成IR的时候需要一个结构体来存储上下文
 pub struct Context {
@@ -92,4 +93,14 @@ impl FunctionInfo {
     pub fn push_inst(&self, program: &mut Program, inst: Value) {
         self.push_inst_to(program, self.cur, inst);
     }
+
+    /// 获取 value 对应的 value_data
+    pub fn value(&self, program: &mut Program, value: Value) -> ValueData {
+        program
+            .func_mut(self.func)
+            .dfg()
+            .value(value)
+            .clone()
+    }
+
 }

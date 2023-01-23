@@ -1,1 +1,1 @@
-cargo run -- -riscv hello.c -o hello.riscv
+cargo run -- -koopa hello.c -o hello.koopa

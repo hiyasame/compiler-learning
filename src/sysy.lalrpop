@@ -1,4 +1,4 @@
-use crate::frontend::ast::{ CompUnit, FuncDef, FuncType, Block, Stmt, Exp, UnaryExp, PrimaryExp, UnaryOp };
+use crate::frontend::ast::*;
 
 // lalrpop 里的约定
 grammar;
@@ -31,12 +31,12 @@ Block: Block = "{" <stmt: Stmt> "}" => Block { <> };
 
 Stmt: Stmt = "return" <exp: Exp> ";" => Stmt { <> };
 
-Exp: Exp = <unary_exp: UnaryExp> => Exp { unary_exp };
+Exp: Exp = <lor_exp: LOrExp> => Exp { lor_exp };
 
 UnaryExp: UnaryExp = {
     <exp: PrimaryExp> => UnaryExp::PrimaryExpression(exp),
     // + 的一元运算什么都不做
-    "+" <exp: PrimaryExp> => UnaryExp::PrimaryExpression(exp),
+    "+" <exp: UnaryExp> => UnaryExp::UnaryExpression(Box::new(exp)),
     <op: UnaryOp> <exp: UnaryExp> => UnaryExp::UnaryOpAndExp(op, Box::new(exp))
 }
 
@@ -62,4 +62,71 @@ IntConst: i32 = {
   r"[1-9][0-9]*" => i32::from_str_radix(<>, 10).unwrap(),
   r"0[0-7]*" => i32::from_str_radix(<>, 8).unwrap(),
   r"0[xX][0-9a-fA-F]+" => i32::from_str_radix(&<>[2..], 16).unwrap(),
+}
+
+// MulExp ::= UnaryExp | MulExp ("*" | "/" | "%") UnaryExp;
+MulExp: MulExp = {
+    <exp: UnaryExp> => MulExp::Unary(exp),
+    <mul: MulExp> <op: MulAndDivAndModOp> <unary: UnaryExp> => MulExp::Mul(
+            Box::new(mul),
+            op,
+            unary
+        )
+}
+
+// AddExp ::= MulExp | AddExp ("+" | "-") MulExp;
+AddExp: AddExp = {
+    <exp: MulExp> => AddExp::Mul(exp),
+    <add: AddExp> <op: AddAndSubOp> <mul: MulExp> => AddExp::Add(
+           Box::new(add),
+           op,
+           mul
+        )
+}
+
+AddAndSubOp: BinaryOp = {
+    "+" => BinaryOp::Add,
+    "-" => BinaryOp::Sub,
+}
+
+MulAndDivAndModOp: BinaryOp = {
+    "*" => BinaryOp::Mul,
+    "/" => BinaryOp::Div,
+    "%" => BinaryOp::Mod,
+}
+
+// RelExp ::= AddExp | RelExp ("<" | ">" | "<=" | ">=") AddExp;
+RelExp: RelExp = {
+    <add: AddExp> => RelExp::Add(add),
+    <rel: RelExp> <op: CompareOp> <add: AddExp> => RelExp::Rel(Box::new(rel), op, add)
+}
+
+// EqExp ::= RelExp | EqExp ("==" | "!=") RelExp;
+EqExp: EqExp = {
+    <rel: RelExp> => EqExp::Rel(rel),
+    <eq: EqExp> <op: EqAndNEqOp> <rel: RelExp> => EqExp::Eq(Box::new(eq), op, rel)
+}
+
+// LAndExp ::= EqExp | LAndExp "&&" EqExp;
+LAndExp: LAndExp = {
+    <eq: EqExp> => LAndExp::Eq(eq),
+    <and: LAndExp> "&&" <eq: EqExp> => LAndExp::And(Box::new(and), eq)
+}
+
+// LOrExp ::= LAndExp | LOrExp "||" LAndExp;
+LOrExp: LOrExp = {
+    <and: LAndExp> => LOrExp::And(and),
+    <or: LOrExp> "||" <and: LAndExp> => LOrExp::Or(Box::new(or), and)
+}
+
+EqAndNEqOp: BinaryOp = {
+    "==" => BinaryOp::Eq,
+    "!=" => BinaryOp::Neq
+}
+
+CompareOp: BinaryOp = {
+    "<" => BinaryOp::Lt,
+    ">" => BinaryOp::Gt,
+    "<=" => BinaryOp::Le,
+    ">=" => BinaryOp::Ge
 }

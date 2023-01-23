@@ -2,7 +2,8 @@ use std::error::Error;
 use koopa::back::KoopaGenerator;
 use koopa::ir::{BinaryOp, FunctionData, Program, Type, Value};
 use koopa::ir::builder::{BasicBlockBuilder, LocalInstBuilder, ValueBuilder};
-use crate::frontend::ast::{Block, Exp, FuncDef, FuncType, PrimaryExp, Stmt, UnaryExp, UnaryOp};
+use crate::frontend::ast;
+use crate::frontend::ast::{AddExp, Block, EqExp, Exp, FuncDef, FuncType, LAndExp, LOrExp, MulExp, PrimaryExp, RelExp, Stmt, UnaryExp, UnaryOp};
 use crate::frontend::context::{Context, cur_func, FunctionInfo};
 use super::ast::CompUnit;
 
@@ -85,7 +86,185 @@ impl ProgramGen for Exp {
     type Out = Value;
 
     fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
-        self.unary_exp.generate(program, context)
+        self.lor_exp.generate(program, context)
+    }
+}
+
+// LOrExp ::= LAndExp | LOrExp "||" LAndExp;
+impl ProgramGen for LOrExp {
+    type Out = Value;
+
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
+        Ok(match self {
+            LOrExp::And(and) => {
+                and.generate(program, context)?
+            }
+            LOrExp::Or(or, and) => {
+                // 利用按位运算实现布尔运算
+                // https://juejin.cn/post/7077114074177208351
+                // l && r : l | r == (l | r) | 1
+                let left = or.generate(program, context)?;
+                let right = and.generate(program, context)?;
+                let zero = cur_func!(context).new_value(program).integer(0);
+                let one = cur_func!(context).new_value(program).integer(1);
+                // left != 0
+                let left = cur_func!(context).new_value(program).binary(BinaryOp::NotEq, left, zero);
+                cur_func!(context).push_inst(program, left);
+                // right != 0
+                let right = cur_func!(context).new_value(program).binary(BinaryOp::NotEq, right, zero);
+                cur_func!(context).push_inst(program, right);
+                // l | r
+                let l_or_r = cur_func!(context).new_value(program).binary(BinaryOp::Or, left, right);
+                cur_func!(context).push_inst(program, l_or_r);
+                // (l | r) | 1
+                let l_or_r_or_1 = cur_func!(context).new_value(program).binary(BinaryOp::Or, l_or_r, one);
+                cur_func!(context).push_inst(program, l_or_r_or_1);
+                let value = cur_func!(context).new_value(program).binary(BinaryOp::Eq, l_or_r, l_or_r_or_1);
+                cur_func!(context).push_inst(program, value);
+                value
+            }
+        })
+    }
+}
+
+// LAndExp ::= EqExp | LAndExp "&&" EqExp;
+impl ProgramGen for LAndExp {
+    type Out = Value;
+
+    // BinaryOp::And 是按位与，不能直接使用
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
+        Ok(match self {
+            LAndExp::Eq(eq) => eq.generate(program, context)?,
+            LAndExp::And(and, eq) => {
+                // 利用按位运算实现布尔运算
+                // https://juejin.cn/post/7077114074177208351
+                // l || r : l & r == (l | r) | 1
+                let left = and.generate(program, context)?;
+                let right = eq.generate(program, context)?;
+                let zero = cur_func!(context).new_value(program).integer(0);
+                let one = cur_func!(context).new_value(program).integer(1);
+                // left != 0
+                let left = cur_func!(context).new_value(program).binary(BinaryOp::NotEq, left, zero);
+                cur_func!(context).push_inst(program, left);
+                // right != 0
+                let right = cur_func!(context).new_value(program).binary(BinaryOp::NotEq, right, zero);
+                cur_func!(context).push_inst(program, right);
+                let l_and_r = cur_func!(context).new_value(program).binary(BinaryOp::And, left, right);
+                cur_func!(context).push_inst(program, l_and_r);
+                // l | r
+                let l_or_r = cur_func!(context).new_value(program).binary(BinaryOp::Or, left, right);
+                cur_func!(context).push_inst(program, l_or_r);
+                // (l | r) | 1
+                let l_or_r_or_1 = cur_func!(context).new_value(program).binary(BinaryOp::Or, l_or_r, one);
+                cur_func!(context).push_inst(program, l_or_r_or_1);
+                let value = cur_func!(context).new_value(program).binary(BinaryOp::Eq, l_and_r, l_or_r_or_1);
+                cur_func!(context).push_inst(program, value);
+                value
+            }
+        })
+    }
+}
+
+// EqExp ::= RelExp | EqExp ("==" | "!=") RelExp;
+impl ProgramGen for EqExp {
+    type Out = Value;
+
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
+        Ok(match self {
+            EqExp::Rel(rel) => rel.generate(program, context)?,
+            EqExp::Eq(eq, op, rel) => {
+                let left = eq.generate(program, context)?;
+                let right = rel.generate(program, context)?;
+                let value = match op {
+                    ast::BinaryOp::Eq => cur_func!(context).new_value(program).binary(BinaryOp::Eq, left, right),
+                    ast::BinaryOp::Neq => cur_func!(context).new_value(program).binary(BinaryOp::NotEq, left, right),
+                    _ => unreachable!()
+                };
+                cur_func!(context).push_inst(program, value);
+                value
+            }
+        })
+    }
+}
+
+// RelExp ::= AddExp | RelExp ("<" | ">" | "<=" | ">=") AddExp;
+impl ProgramGen for RelExp {
+    type Out = Value;
+
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
+        Ok(match self {
+            RelExp::Add(add) => add.generate(program, context)?,
+            RelExp::Rel(rel, op, add) => {
+                let left = rel.generate(program, context)?;
+                let right = add.generate(program, context)?;
+                let value = match op {
+                    ast::BinaryOp::Lt => cur_func!(context).new_value(program).binary(BinaryOp::Lt, left, right),
+                    ast::BinaryOp::Le => cur_func!(context).new_value(program).binary(BinaryOp::Le, left, right),
+                    ast::BinaryOp::Gt => cur_func!(context).new_value(program).binary(BinaryOp::Gt, left, right),
+                    ast::BinaryOp::Ge => cur_func!(context).new_value(program).binary(BinaryOp::Ge, left, right),
+                    _ => unreachable!()
+                };
+                cur_func!(context).push_inst(program, value);
+                value
+            },
+        })
+    }
+}
+
+// AddExp ::= MulExp | AddExp ("+" | "-") MulExp;
+impl ProgramGen for AddExp {
+    type Out = Value;
+
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
+        Ok(match self {
+            AddExp::Add(add_exp, op, mul_exp) => {
+                let left_value = add_exp.generate(program, context)?;
+                let right_value = mul_exp.generate(program, context)?;
+                let value = match op {
+                    ast::BinaryOp::Add => {
+                        cur_func!(context).new_value(program).binary(BinaryOp::Add, left_value, right_value)
+                    }
+                    ast::BinaryOp::Sub => {
+                        cur_func!(context).new_value(program).binary(BinaryOp::Sub, left_value, right_value)
+                    }
+                    _ => unreachable!()
+                };
+                cur_func!(context).push_inst(program, value);
+                value
+            }
+            AddExp::Mul(mul_exp) => {
+                mul_exp.generate(program, context)?
+            }
+        })
+    }
+}
+
+// MulExp ::= UnaryExp | MulExp ("*" | "/" | "%") UnaryExp;
+impl ProgramGen for MulExp {
+    type Out = Value;
+
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
+        Ok(match self {
+            MulExp::Unary(unary) => unary.generate(program, context)?,
+            MulExp::Mul(mul_exp, op, unary) => {
+                let left_value = mul_exp.generate(program, context)?;
+                let right_value = unary.generate(program, context)?;
+                let value = match op {
+                    ast::BinaryOp::Mul => {
+                        cur_func!(context).new_value(program).binary(BinaryOp::Mul, left_value, right_value)
+                    }
+                    ast::BinaryOp::Div => {
+                        cur_func!(context).new_value(program).binary(BinaryOp::Div, left_value, right_value)
+                    }
+                    ast::BinaryOp::Mod => {
+                        cur_func!(context).new_value(program).binary(BinaryOp::Mod, left_value, right_value)
+                    }
+                    _ => unreachable!()
+                };
+                cur_func!(context).push_inst(program, value);
+                value
+            }
+        })
     }
 }
 
@@ -96,6 +275,9 @@ impl ProgramGen for UnaryExp {
         match self {
             UnaryExp::PrimaryExpression(exp) => {
                 exp.generate(program, context)
+            }
+            UnaryExp::UnaryExpression(unary) => {
+                unary.generate(program, context)
             }
             UnaryExp::UnaryOpAndExp(op, exp) => {
                 let value = exp.generate(program, context)?;

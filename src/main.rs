@@ -24,6 +24,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let input = args.next().unwrap(); // hello.c
     args.next(); // -o
     let output = args.next().unwrap(); // hello.koopa
+    println!("{}", input);
     // 读取输入文件
     let input = read_to_string(input)?;
     // 创建输出文件
