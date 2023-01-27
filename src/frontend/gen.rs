@@ -1,23 +1,18 @@
-use std::error::Error;
+use std::borrow::BorrowMut;
+use std::ops::DerefMut;
 use koopa::back::KoopaGenerator;
-use koopa::ir::{BinaryOp, FunctionData, Program, Type, Value};
-use koopa::ir::builder::{BasicBlockBuilder, LocalInstBuilder, ValueBuilder};
+use koopa::ir::{BinaryOp, FunctionData, Program, Type, Value, ValueKind, values};
+use koopa::ir::builder::{BasicBlockBuilder, EntityInfoQuerier, GlobalInstBuilder, LocalInstBuilder, ValueBuilder};
 use crate::frontend::ast;
-use crate::frontend::ast::{AddExp, Block, EqExp, Exp, FuncDef, FuncType, LAndExp, LOrExp, MulExp, PrimaryExp, RelExp, Stmt, UnaryExp, UnaryOp};
-use crate::frontend::context::{Context, cur_func, FunctionInfo};
+use crate::frontend::ast::{AddExp, Block, BlockItem, ConstDecl, ConstDef, ConstExp, ConstInitVal, Decl, EqExp, Exp, FuncDef, FuncType, InitVal, LAndExp, LOrExp, MulExp, PrimaryExp, RelExp, Stmt, UnaryExp, UnaryOp, VarDecl, VarDef};
+use crate::frontend::context::{Context, CTValue, cur_func, FunctionInfo, ValueExtension};
+use crate::frontend::Error::CannotAssignConstant;
+use crate::frontend::eval::Evaluate;
 use super::ast::CompUnit;
+use super::Result;
 
-pub fn compile_koopa(ast: CompUnit) -> Result<String, Box<dyn Error>> {
+pub fn compile_koopa(ast: CompUnit) -> Result<String> {
     let mut program = Program::new();
-
-    // let func = program.new_func(FunctionData::with_param_names(format!("@{}", ast.func_def.ident), vec![], Type::get_i32()));
-    // let func_data = program.func_mut(func);
-    // let entry = func_data.dfg_mut().new_bb().basic_block(Some("%entry".into()));
-    // func_data.layout_mut().bbs_mut().extend([entry]);
-    // let ret_value = func_data.dfg_mut().new_value().integer(ast.func_def.block.stmt.num);
-    // let ret = func_data.dfg_mut().new_value().ret(Some(ret_value));
-    // func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(ret).unwrap();
-
     ast.generate(&mut program, &mut Context::new())?;
     let mut gen = KoopaGenerator::new(vec![]);
     gen.generate_on(&program).expect("koopa ir generation failed");
@@ -26,13 +21,13 @@ pub fn compile_koopa(ast: CompUnit) -> Result<String, Box<dyn Error>> {
 
 trait ProgramGen {
     type Out;
-    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>>;
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out>;
 }
 
 impl ProgramGen for CompUnit {
     type Out = ();
 
-    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
         self.func_def.generate(program, context)?;
         Ok(())
     }
@@ -41,7 +36,7 @@ impl ProgramGen for CompUnit {
 impl ProgramGen for FuncDef {
     type Out = ();
 
-    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
         let mut func_data = FunctionData::with_param_names(format!("@{}", self.ident), vec![], self.func_type.generate(program, context)?);
 
         let entry = func_data.dfg_mut().new_bb().basic_block(Some("%entry".into()));
@@ -50,14 +45,19 @@ impl ProgramGen for FuncDef {
         let mut info = FunctionInfo::new(func, entry);
         info.push_bb(program, entry);
         context.cur_func = Some(info);
-        self.block.generate(program, context)
+        // 进入函数
+        context.enter();
+        self.block.generate(program, context)?;
+        // 退出函数
+        context.exit();
+        Ok(())
     }
 }
 
 impl ProgramGen for FuncType {
     type Out = Type;
 
-    fn generate(&self, _program: &mut Program, _context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
+    fn generate(&self, _program: &mut Program, _context: &mut Context) -> Result<Self::Out> {
         Ok(match self {
             Self::Int => Type::get_i32()
         })
@@ -66,18 +66,115 @@ impl ProgramGen for FuncType {
 
 impl ProgramGen for Block {
     type Out = ();
-    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
-        self.stmt.generate(program, context)
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
+        self.block_items.iter().for_each(|item| {
+            item.generate(program, context).expect("generation failed");
+        });
+        Ok(())
+    }
+}
+
+impl ProgramGen for BlockItem {
+    type Out = ();
+
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
+        match self {
+            BlockItem::Declare(decl) => {
+                decl.generate(program, context)?
+            }
+            BlockItem::Statement(stmt) => {
+                stmt.generate(program, context)?
+            }
+        };
+        Ok(())
+    }
+}
+
+impl ProgramGen for Decl {
+    type Out = ();
+
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
+        match self {
+            Self::Const(decl) => {
+                decl.generate(program, context)
+            }
+            Self::Var(decl) => {
+                decl.generate(program, context)
+            }
+        }
+
+    }
+}
+
+impl ProgramGen for ConstDecl {
+    type Out = ();
+
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
+        for def in &self.const_defs {
+            def.generate(program, context)?
+        }
+        Ok(())
+    }
+}
+
+impl ProgramGen for ConstDef {
+    type Out = ();
+
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
+        let value = CTValue::Const(self.val.generate(program, context)?);
+        context.new_value(self.ident.clone(), value)
+    }
+}
+
+impl ProgramGen for ConstInitVal {
+    type Out = i32;
+
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
+        self.exp.generate(program, context)
+    }
+}
+
+impl ProgramGen for ConstExp {
+    type Out = i32;
+
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
+        Ok(self.exp.eval(program, context).unwrap())
     }
 }
 
 impl ProgramGen for Stmt {
     type Out = ();
-    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
-        let ret_value = self.exp.generate(program, context)?;
-        // 处理返回值
-        let ret = cur_func!(context).new_value(program).ret(Some(ret_value));
-        cur_func!(context).push_inst(program, ret);
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
+        match self {
+            Stmt::Exp(lval, exp) => {
+                // 更新变量的值
+                let value = exp.generate(program, context)?;
+                if let CTValue::Runtime(dest) = context.value(lval.ident.as_str())? {
+                    cur_func!(context)
+                        .new_value(program)
+                        .store(value, dest)
+                        .push(program, context);
+                } else {
+                    return Err(CannotAssignConstant)
+                }
+                context.update_value(lval.ident.to_string(), value)?;
+            }
+            Stmt::Ret(exp) => {
+                let mut ret_value = exp.generate(program, context)?;
+                // 如果是alloc，先load再返回
+                if let ValueKind::Alloc(..) = cur_func!(context).value(program, ret_value).kind() {
+                    ret_value = cur_func!(context)
+                        .new_value(program)
+                        .load(ret_value)
+                        .push(program, context)
+                }
+                // 处理返回值
+                cur_func!(context)
+                    .new_value(program)
+                    .ret(Some(ret_value))
+                    .push(program, context);
+            }
+        }
         Ok(())
     }
 }
@@ -85,7 +182,7 @@ impl ProgramGen for Stmt {
 impl ProgramGen for Exp {
     type Out = Value;
 
-    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
         self.lor_exp.generate(program, context)
     }
 }
@@ -94,7 +191,7 @@ impl ProgramGen for Exp {
 impl ProgramGen for LOrExp {
     type Out = Value;
 
-    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
         Ok(match self {
             LOrExp::And(and) => {
                 and.generate(program, context)?
@@ -108,19 +205,29 @@ impl ProgramGen for LOrExp {
                 let zero = cur_func!(context).new_value(program).integer(0);
                 let one = cur_func!(context).new_value(program).integer(1);
                 // left != 0
-                let left = cur_func!(context).new_value(program).binary(BinaryOp::NotEq, left, zero);
-                cur_func!(context).push_inst(program, left);
+                let left = cur_func!(context)
+                    .new_value(program)
+                    .binary(BinaryOp::NotEq, left, zero)
+                    .push(program ,context);
                 // right != 0
-                let right = cur_func!(context).new_value(program).binary(BinaryOp::NotEq, right, zero);
-                cur_func!(context).push_inst(program, right);
+                let right = cur_func!(context)
+                    .new_value(program)
+                    .binary(BinaryOp::NotEq, right, zero)
+                    .push(program, context);
                 // l | r
-                let l_or_r = cur_func!(context).new_value(program).binary(BinaryOp::Or, left, right);
-                cur_func!(context).push_inst(program, l_or_r);
+                let l_or_r = cur_func!(context)
+                    .new_value(program)
+                    .binary(BinaryOp::Or, left, right)
+                    .push(program, context);
                 // (l | r) | 1
-                let l_or_r_or_1 = cur_func!(context).new_value(program).binary(BinaryOp::Or, l_or_r, one);
-                cur_func!(context).push_inst(program, l_or_r_or_1);
-                let value = cur_func!(context).new_value(program).binary(BinaryOp::Eq, l_or_r, l_or_r_or_1);
-                cur_func!(context).push_inst(program, value);
+                let l_or_r_or_1 = cur_func!(context)
+                    .new_value(program)
+                    .binary(BinaryOp::Or, l_or_r, one)
+                    .push(program, context);
+                let value = cur_func!(context)
+                    .new_value(program)
+                    .binary(BinaryOp::Eq, l_or_r, l_or_r_or_1)
+                    .push(program, context);
                 value
             }
         })
@@ -132,7 +239,7 @@ impl ProgramGen for LAndExp {
     type Out = Value;
 
     // BinaryOp::And 是按位与，不能直接使用
-    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
         Ok(match self {
             LAndExp::Eq(eq) => eq.generate(program, context)?,
             LAndExp::And(and, eq) => {
@@ -144,21 +251,33 @@ impl ProgramGen for LAndExp {
                 let zero = cur_func!(context).new_value(program).integer(0);
                 let one = cur_func!(context).new_value(program).integer(1);
                 // left != 0
-                let left = cur_func!(context).new_value(program).binary(BinaryOp::NotEq, left, zero);
-                cur_func!(context).push_inst(program, left);
+                let left = cur_func!(context)
+                    .new_value(program)
+                    .binary(BinaryOp::NotEq, left, zero)
+                    .push(program, context);
                 // right != 0
-                let right = cur_func!(context).new_value(program).binary(BinaryOp::NotEq, right, zero);
-                cur_func!(context).push_inst(program, right);
-                let l_and_r = cur_func!(context).new_value(program).binary(BinaryOp::And, left, right);
-                cur_func!(context).push_inst(program, l_and_r);
+                let right = cur_func!(context)
+                    .new_value(program)
+                    .binary(BinaryOp::NotEq, right, zero)
+                    .push(program, context);
+                let l_and_r = cur_func!(context)
+                    .new_value(program)
+                    .binary(BinaryOp::And, left, right)
+                    .push(program, context);
                 // l | r
-                let l_or_r = cur_func!(context).new_value(program).binary(BinaryOp::Or, left, right);
-                cur_func!(context).push_inst(program, l_or_r);
+                let l_or_r = cur_func!(context)
+                    .new_value(program)
+                    .binary(BinaryOp::Or, left, right)
+                    .push(program, context);
                 // (l | r) | 1
-                let l_or_r_or_1 = cur_func!(context).new_value(program).binary(BinaryOp::Or, l_or_r, one);
-                cur_func!(context).push_inst(program, l_or_r_or_1);
-                let value = cur_func!(context).new_value(program).binary(BinaryOp::Eq, l_and_r, l_or_r_or_1);
-                cur_func!(context).push_inst(program, value);
+                let l_or_r_or_1 = cur_func!(context)
+                    .new_value(program)
+                    .binary(BinaryOp::Or, l_or_r, one)
+                    .push(program, context);
+                let value = cur_func!(context)
+                    .new_value(program)
+                    .binary(BinaryOp::Eq, l_and_r, l_or_r_or_1)
+                    .push(program, context);
                 value
             }
         })
@@ -169,7 +288,7 @@ impl ProgramGen for LAndExp {
 impl ProgramGen for EqExp {
     type Out = Value;
 
-    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
         Ok(match self {
             EqExp::Rel(rel) => rel.generate(program, context)?,
             EqExp::Eq(eq, op, rel) => {
@@ -191,7 +310,7 @@ impl ProgramGen for EqExp {
 impl ProgramGen for RelExp {
     type Out = Value;
 
-    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
         Ok(match self {
             RelExp::Add(add) => add.generate(program, context)?,
             RelExp::Rel(rel, op, add) => {
@@ -215,11 +334,20 @@ impl ProgramGen for RelExp {
 impl ProgramGen for AddExp {
     type Out = Value;
 
-    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
         Ok(match self {
             AddExp::Add(add_exp, op, mul_exp) => {
-                let left_value = add_exp.generate(program, context)?;
-                let right_value = mul_exp.generate(program, context)?;
+                let mut left_value = add_exp.generate(program, context)?;
+                let mut right_value = mul_exp.generate(program, context)?;
+                // 如果是alloc 就load一下
+                if let ValueKind::Alloc(..) = cur_func!(context).value(program, left_value).kind() {
+                    left_value = cur_func!(context).new_value(program).load(left_value)
+                        .push(program, context)
+                }
+                if let ValueKind::Alloc(..) = cur_func!(context).value(program, right_value).kind() {
+                    right_value = cur_func!(context).new_value(program).load(right_value)
+                        .push(program, context)
+                }
                 let value = match op {
                     ast::BinaryOp::Add => {
                         cur_func!(context).new_value(program).binary(BinaryOp::Add, left_value, right_value)
@@ -243,12 +371,21 @@ impl ProgramGen for AddExp {
 impl ProgramGen for MulExp {
     type Out = Value;
 
-    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
         Ok(match self {
             MulExp::Unary(unary) => unary.generate(program, context)?,
             MulExp::Mul(mul_exp, op, unary) => {
-                let left_value = mul_exp.generate(program, context)?;
-                let right_value = unary.generate(program, context)?;
+                let mut left_value = mul_exp.generate(program, context)?;
+                let mut right_value = unary.generate(program, context)?;
+                // 如果是alloc 就load一下
+                if let ValueKind::Alloc(..) = cur_func!(context).value(program, left_value).kind() {
+                    left_value = cur_func!(context).new_value(program).load(left_value)
+                        .push(program, context)
+                }
+                if let ValueKind::Alloc(..) = cur_func!(context).value(program, right_value).kind() {
+                    right_value = cur_func!(context).new_value(program).load(right_value)
+                        .push(program, context)
+                }
                 let value = match op {
                     ast::BinaryOp::Mul => {
                         cur_func!(context).new_value(program).binary(BinaryOp::Mul, left_value, right_value)
@@ -271,7 +408,7 @@ impl ProgramGen for MulExp {
 impl ProgramGen for UnaryExp {
     type Out = Value;
 
-    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
         match self {
             UnaryExp::PrimaryExpression(exp) => {
                 exp.generate(program, context)
@@ -296,15 +433,85 @@ impl ProgramGen for UnaryExp {
 impl ProgramGen for PrimaryExp {
     type Out = Value;
 
-    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out, Box<dyn Error>> {
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
         match self {
             PrimaryExp::Expression(exp) => {
                 exp.generate(program, context)
             }
             PrimaryExp::Number(num) => {
-                let value = cur_func!(context).new_value(program).integer(num.clone());
+                let value = cur_func!(context).new_value(program).integer(*num);
                 Ok(value)
             }
+            PrimaryExp::LValue(lval) => {
+                // 得从符号表里面去取
+                let ct_value = context.value(lval.ident.as_str())?;
+                Ok(match ct_value {
+                    CTValue::Const(i32) => cur_func!(context).new_value(program).integer(i32),
+                    CTValue::Runtime(value) => value,
+                })
+            }
         }
+    }
+}
+
+
+impl ProgramGen for VarDecl {
+    type Out = ();
+
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
+        for def in &self.defs {
+            def.generate(program, context)?
+        }
+        Ok(())
+    }
+}
+
+impl ProgramGen for VarDef {
+    type Out = ();
+
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
+        match self {
+            VarDef::NotInit { ident } => {
+                let value = if context.is_global() {
+                    let value = program.new_value().zero_init(Type::get_i32());
+                    program.borrow_value(value);
+                    // global的变量不用push
+                    program.new_value()
+                        .global_alloc(value)
+                } else {
+                    cur_func!(context)
+                        .new_value(program)
+                        .alloc(Type::get_i32())
+                        .push(program, context)
+                };
+                context.new_value(ident.to_string(), CTValue::Runtime(value))?;
+            }
+            VarDef::Init { ident, val } => {
+                let val = val.generate(program, context)?;
+                let value = if context.is_global() {
+                    program.new_value().global_alloc(val)
+                } else {
+                    let alloc = cur_func!(context)
+                        .new_value(program)
+                        .alloc(Type::get_i32())
+                        .push(program, context);
+                    cur_func!(context)
+                        .new_value(program)
+                        .store(val, alloc)
+                        .push(program, context);
+                    alloc
+                };
+                context.new_value(ident.to_string(), CTValue::Runtime(value))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ProgramGen for InitVal {
+    type Out = Value;
+
+    fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
+        self.exp.generate(program, context)
     }
 }

@@ -16,13 +16,9 @@ pub enum FuncType {
 }
 
 #[derive(Debug)]
-pub struct Block {
-    pub stmt: Stmt
-}
-
-#[derive(Debug)]
-pub struct Stmt {
-    pub exp: Exp
+pub enum Stmt {
+    Ret(Exp),
+    Exp(LVal, Exp)
 }
 
 #[derive(Debug)]
@@ -33,6 +29,7 @@ pub struct Exp {
 #[derive(Debug)]
 pub enum PrimaryExp {
     Expression(Box<Exp>),
+    LValue(LVal),
     Number(i32)
 }
 
@@ -114,3 +111,63 @@ pub enum LOrExp {
     And(LAndExp),
     Or(Box<LOrExp>, LAndExp)
 }
+
+#[derive(Debug)]
+pub enum Decl {
+    Const(ConstDecl),
+    Var(VarDecl)
+}
+
+#[derive(Debug)]
+pub struct ConstDecl {
+    pub const_defs: Vec<ConstDef>
+}
+
+#[derive(Debug)]
+pub struct ConstDef {
+    pub ident: String,
+    pub val: ConstInitVal
+}
+
+#[derive(Debug)]
+pub struct ConstInitVal {
+    pub exp: ConstExp,
+}
+
+#[derive(Debug)]
+pub struct Block {
+    pub block_items: Vec<BlockItem>
+}
+
+#[derive(Debug)]
+pub enum BlockItem {
+    Declare(Decl),
+    Statement(Stmt)
+}
+
+#[derive(Debug)]
+pub struct LVal {
+    pub ident: String
+}
+
+#[derive(Debug)]
+pub struct ConstExp {
+    pub exp: Exp
+}
+
+#[derive(Debug)]
+pub struct VarDecl {
+    pub defs: Vec<VarDef>
+}
+
+#[derive(Debug)]
+pub enum VarDef {
+    NotInit { ident: String },
+    Init { ident: String, val: InitVal }
+}
+
+#[derive(Debug)]
+pub struct InitVal {
+    pub exp: Exp
+}
+

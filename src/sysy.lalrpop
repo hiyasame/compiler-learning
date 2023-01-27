@@ -27,9 +27,12 @@ FuncDef: FuncDef = {
 
 FuncType: FuncType = "int" => FuncType::Int;
 
-Block: Block = "{" <stmt: Stmt> "}" => Block { <> };
+Block: Block = "{" <block_items: (BlockItem)*> "}" => Block { block_items };
 
-Stmt: Stmt = "return" <exp: Exp> ";" => Stmt { <> };
+Stmt: Stmt = {
+    "return" <exp: Exp> ";" => Stmt::Ret(exp),
+     <lval: LVal> "=" <exp: Exp> ";" => Stmt::Exp(lval, exp)
+}
 
 Exp: Exp = <lor_exp: LOrExp> => Exp { lor_exp };
 
@@ -47,6 +50,7 @@ UnaryOp: UnaryOp = {
 
 PrimaryExp: PrimaryExp = {
     "(" <exp: Exp> ")" => PrimaryExp::Expression(Box::new(exp)),
+    <lval: LVal> => PrimaryExp::LValue(lval),
     <number: Number> => PrimaryExp::Number(number)
 }
 
@@ -130,3 +134,46 @@ CompareOp: BinaryOp = {
     "<=" => BinaryOp::Le,
     ">=" => BinaryOp::Ge
 }
+
+Decl: Decl = {
+    <const_decl: ConstDecl> => Decl::Const(const_decl),
+    <var_decl: VarDecl> => Decl::Var(var_decl)
+}
+
+ConstDecl: ConstDecl = {
+    "const" BType <def0: ConstDef> <mut constdef: ("," <ConstDef>)*> ";" => {
+        constdef.insert(0, def0);
+        ConstDecl { const_defs: constdef }
+      }
+}
+
+BType: String = "int" => <>.to_string();
+
+ConstDef: ConstDef = {
+    <ident: Ident> "=" <val: ConstInitVal> => ConstDef { ident, val }
+}
+
+ConstInitVal: ConstInitVal = {
+    <exp: ConstExp> => ConstInitVal { exp }
+}
+
+BlockItem: BlockItem = {
+    <decl: Decl> => BlockItem::Declare(decl),
+    <stmt: Stmt> => BlockItem::Statement(stmt)
+}
+
+LVal: LVal = <ident: Ident> => LVal { ident };
+
+ConstExp: ConstExp = <exp: Exp> => ConstExp { exp };
+
+VarDecl: VarDecl = BType <def0: VarDef> <mut defs: ("," <VarDef>)*> ";" => {
+    defs.insert(0, def0);
+    VarDecl { defs }
+};
+
+VarDef: VarDef = {
+    <ident: Ident> => VarDef::NotInit { ident },
+    <ident: Ident> "=" <val: InitVal> => VarDef::Init { ident, val }
+}
+
+InitVal: InitVal = <exp: Exp> => InitVal { exp };

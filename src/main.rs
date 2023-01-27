@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut file = File::create(output)?;
     // 创建AST
     let ast: CompUnit = sysy::CompUnitParser::new().parse(&input).unwrap();
-    let koopa_source = compile_koopa(ast)?;
+    let koopa_source = compile_koopa(ast).expect("frontend compile error");
 
     if mode == "-koopa" {
         // 编译到 koopa ir
