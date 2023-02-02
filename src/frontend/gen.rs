@@ -1,8 +1,6 @@
-use std::borrow::BorrowMut;
-use std::ops::DerefMut;
 use koopa::back::KoopaGenerator;
-use koopa::ir::{BinaryOp, FunctionData, Program, Type, Value, ValueKind, values};
-use koopa::ir::builder::{BasicBlockBuilder, EntityInfoQuerier, GlobalInstBuilder, LocalInstBuilder, ValueBuilder};
+use koopa::ir::{BinaryOp, FunctionData, Program, Type, Value, ValueKind};
+use koopa::ir::builder::{BasicBlockBuilder, GlobalInstBuilder, LocalInstBuilder, ValueBuilder};
 use crate::frontend::ast;
 use crate::frontend::ast::{AddExp, Block, BlockItem, ConstDecl, ConstDef, ConstExp, ConstInitVal, Decl, EqExp, Exp, FuncDef, FuncType, InitVal, LAndExp, LOrExp, MulExp, PrimaryExp, RelExp, Stmt, UnaryExp, UnaryOp, VarDecl, VarDef};
 use crate::frontend::context::{Context, CTValue, cur_func, FunctionInfo, ValueExtension};
@@ -40,7 +38,6 @@ impl ProgramGen for FuncDef {
         let mut func_data = FunctionData::with_param_names(format!("@{}", self.ident), vec![], self.func_type.generate(program, context)?);
 
         let entry = func_data.dfg_mut().new_bb().basic_block(Some("%entry".into()));
-
         let func = program.new_func(func_data);
         let mut info = FunctionInfo::new(func, entry);
         info.push_bb(program, entry);
@@ -146,7 +143,7 @@ impl ProgramGen for Stmt {
     type Out = ();
     fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
         match self {
-            Stmt::Exp(lval, exp) => {
+            Stmt::Assign(lval, exp) => {
                 // 更新变量的值
                 let value = exp.generate(program, context)?;
                 if let CTValue::Runtime(dest) = context.value(lval.ident.as_str())? {
@@ -157,7 +154,6 @@ impl ProgramGen for Stmt {
                 } else {
                     return Err(CannotAssignConstant)
                 }
-                context.update_value(lval.ident.to_string(), value)?;
             }
             Stmt::Ret(exp) => {
                 let mut ret_value = exp.generate(program, context)?;
@@ -173,6 +169,16 @@ impl ProgramGen for Stmt {
                     .new_value(program)
                     .ret(Some(ret_value))
                     .push(program, context);
+            }
+            Stmt::Exp(exp) => {
+                if let Some(exp) = exp {
+                    exp.generate(program, context)?;
+                }
+            }
+            Stmt::Block(block) => {
+                context.enter();
+                block.generate(program, context)?;
+                context.exit();
             }
         }
         Ok(())

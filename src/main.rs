@@ -24,7 +24,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let input = args.next().unwrap(); // hello.c
     args.next(); // -o
     let output = args.next().unwrap(); // hello.koopa
-    println!("{}", input);
     // 读取输入文件
     let input = read_to_string(input)?;
     // 创建输出文件
@@ -36,13 +35,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     if mode == "-koopa" {
         // 编译到 koopa ir
         // 调用 lalrpop 生成的 parser 解析输入文件
-        file.write(koopa_source.as_bytes())?;
+        file.write_all(koopa_source.as_bytes())?;
     } else {
         // 将 c 编译到 riscv
         let driver: Driver<_> = koopa_source.into();
         let program = driver.generate_program().expect("koopa ir 解析失败");
         let source = program.generate_riscv();
-        file.write(source.as_bytes())?;
+        file.write_all(source.as_bytes())?;
     }
     Ok(())
 }

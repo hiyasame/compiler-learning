@@ -72,14 +72,15 @@ impl Context {
 
     // 肯定只有变量才能更新，常量想更新是不可能的
     pub fn update_value(&mut self, id: String, value: Value) -> Result<()> {
-        let cur = self.vals.last_mut().unwrap();
-        if cur.contains_key(&id) {
-            // || (is_global && self.funcs.contains_key(&id))
-            cur.insert(id, CTValue::Runtime(value));
-            Ok(())
-        } else {
-            Err(Error::InvalidVarDef)
+        let mut cur = self.vals.len() as i32 - 1;
+        while cur >= 0 {
+            if let Some(..) = self.vals[cur as usize].get(id.as_str()) {
+                self.vals[cur as usize].insert(id, CTValue::Runtime(value));
+                return Ok(());
+            }
+            cur -= 1;
         }
+        Err(Error::InvalidVarDef)
     }
 
     /// Returns the value by the given identifier.
@@ -87,6 +88,19 @@ impl Context {
         let mut cur = self.vals.len() as i32 - 1;
         while cur >= 0 {
             if let Some(value) = self.vals[cur as usize].get(id) {
+                return Ok(value.clone());
+            }
+            cur -= 1;
+        }
+        Err(Error::SymbolNotFound)
+    }
+
+    pub fn value_test(&self, id: &str, program: &mut Program) -> Result<CTValue> {
+        let mut cur = self.vals.len() as i32 - 1;
+        while cur >= 0 {
+            if let Some(value) = self.vals[cur as usize].get(id) {
+                println!("{:?}", self.vals);
+                println!("{}: {:?}", id, cur_func!(self).value(program, value.as_runtime()));
                 return Ok(value.clone());
             }
             cur -= 1;
@@ -164,10 +178,28 @@ impl FunctionInfo {
 }
 
 // Compiler Time Value
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum CTValue {
     Const(i32),
     Runtime(Value)
+}
+
+impl CTValue {
+    fn print(&self, context: &mut Context, program: &mut Program) {
+        match self {
+            Self::Runtime(value) => {
+                println!("{:?}", cur_func!(context).value(program, *value))
+            },
+            Self::Const(i32) => println!("{:?}", i32)
+        }
+    }
+
+    fn as_runtime(&self) -> Value {
+        match self {
+            Self::Runtime(value) => *value,
+            _ => unreachable!()
+        }
+    }
 }
 
 pub trait ValueExtension {

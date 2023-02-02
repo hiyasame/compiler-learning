@@ -18,7 +18,10 @@ pub enum FuncType {
 #[derive(Debug)]
 pub enum Stmt {
     Ret(Exp),
-    Exp(LVal, Exp)
+    Assign(LVal, Exp),
+    // 单个 ; 也是合法语句
+    Exp(Option<Exp>),
+    Block(Block)
 }
 
 #[derive(Debug)]
