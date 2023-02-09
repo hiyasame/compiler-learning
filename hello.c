@@ -1,8 +1,11 @@
 int main() {
-  int a = 1;
-  {
-    a = a + 2;
+  int a = 1, b = 0;
+  if (a || b) {
+    b = 1;
+    a = 0;
   }
-  a = a + 5;
-  return a;
+  if (a && b) {
+    return 0;
+  }
+  return 77;
 }

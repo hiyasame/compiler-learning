@@ -21,7 +21,8 @@ pub enum Stmt {
     Assign(LVal, Exp),
     // 单个 ; 也是合法语句
     Exp(Option<Exp>),
-    Block(Block)
+    Block(Block),
+    If { cond: Exp, then: Box<Stmt>, else_then: Option<Box<Stmt>> }
 }
 
 #[derive(Debug)]

@@ -1,7 +1,6 @@
 use std::collections::HashMap;
-use std::ops::Deref;
-use koopa::ir::{BasicBlock, Function, Program, Value, ValueKind};
-use koopa::ir::builder::{BasicBlockBuilder, LocalBuilder};
+use koopa::ir::{BasicBlock, Function, Program, Type, TypeKind, Value, ValueKind};
+use koopa::ir::builder::{BasicBlockBuilder, LocalBuilder, LocalInstBuilder};
 use koopa::ir::entities::ValueData;
 use super::{Result, Error};
 
@@ -31,7 +30,11 @@ pub(crate) use cur_func_mut;
 pub struct FunctionInfo {
     func: Function,
     entry: BasicBlock,
-    cur: BasicBlock
+    cur: BasicBlock,
+    ret_value: Option<Value>,
+    end_bb: BasicBlock,
+    // 为 true 时表明这段代码是 unreachable 的，不应当继续插入代码
+    unreachable: bool
 }
 
 impl Context {
@@ -70,19 +73,6 @@ impl Context {
         }
     }
 
-    // 肯定只有变量才能更新，常量想更新是不可能的
-    pub fn update_value(&mut self, id: String, value: Value) -> Result<()> {
-        let mut cur = self.vals.len() as i32 - 1;
-        while cur >= 0 {
-            if let Some(..) = self.vals[cur as usize].get(id.as_str()) {
-                self.vals[cur as usize].insert(id, CTValue::Runtime(value));
-                return Ok(());
-            }
-            cur -= 1;
-        }
-        Err(Error::InvalidVarDef)
-    }
-
     /// Returns the value by the given identifier.
     pub fn value(&self, id: &str) -> Result<CTValue> {
         let mut cur = self.vals.len() as i32 - 1;
@@ -112,16 +102,44 @@ impl Context {
 impl FunctionInfo {
 
     /// Creates a new function information.
-    pub fn new(func: Function, entry: BasicBlock) -> Self {
+    pub fn new(func: Function, entry: BasicBlock, program: &mut Program) -> Self {
         Self {
             func,
             entry,
             cur: entry,
+            // 事先把 要 ret 的地方 alloc 一下
+            ret_value: if matches!(program.func(func).ty().kind(), TypeKind::Function(_, ret) if ret.is_i32()) {
+                Some(
+                    program.func_mut(func)
+                        .dfg_mut()
+                        .new_value()
+                        .alloc(Type::get_i32())
+                )
+            } else {
+                None
+            },
+            end_bb: program.func_mut(func)
+                .dfg_mut()
+                .new_bb()
+                .basic_block(Some("%end".into())),
+            unreachable: false
         }
+    }
+
+    pub fn end(&self) -> BasicBlock {
+        self.end_bb
+    }
+
+    pub fn ret_value(&self) -> Value {
+        self.ret_value.unwrap()
     }
 
     pub fn func(&self) -> Function {
         self.func
+    }
+    
+    pub fn set_unreachable(&mut self) {
+        self.unreachable = true;
     }
 
     /// Creates a new basic block in function.
@@ -148,10 +166,15 @@ impl FunctionInfo {
             .push_key_back(bb)
             .unwrap();
         self.cur = bb;
+        self.unreachable = false;
     }
 
     /// Pushes the instruction to the back of the given basic block.
     pub fn push_inst_to(&self, program: &mut Program, bb: BasicBlock, inst: Value) {
+        // unreachable 时什么也不做
+        if self.unreachable {
+            return;
+        }
         program
             .func_mut(self.func)
             .layout_mut()
@@ -204,11 +227,23 @@ impl CTValue {
 
 pub trait ValueExtension {
     fn push(self, program: &mut Program, ctx: &mut Context) -> Value;
+    fn into_int(self, context: &mut Context, program: &mut Program) -> Value;
 }
 
 impl ValueExtension for Value {
     fn push(self, program: &mut Program, ctx: &mut Context) -> Value {
         cur_func!(ctx).push_inst(program, self);
         self
+    }
+
+    fn into_int(self, context: &mut Context, program: &mut Program) -> Value {
+        let mut value = self;
+        if let ValueKind::Alloc(..) = cur_func!(context).value(program, value).kind() {
+            value = cur_func!(context)
+                .new_value(program)
+                .load(value)
+                .push(program, context)
+        }
+        value
     }
 }

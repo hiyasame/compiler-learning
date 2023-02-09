@@ -1,9 +1,9 @@
 use koopa::back::KoopaGenerator;
-use koopa::ir::{BinaryOp, FunctionData, Program, Type, Value, ValueKind};
+use koopa::ir::{BinaryOp, FunctionData, Program, Type, Value};
 use koopa::ir::builder::{BasicBlockBuilder, GlobalInstBuilder, LocalInstBuilder, ValueBuilder};
 use crate::frontend::ast;
 use crate::frontend::ast::{AddExp, Block, BlockItem, ConstDecl, ConstDef, ConstExp, ConstInitVal, Decl, EqExp, Exp, FuncDef, FuncType, InitVal, LAndExp, LOrExp, MulExp, PrimaryExp, RelExp, Stmt, UnaryExp, UnaryOp, VarDecl, VarDef};
-use crate::frontend::context::{Context, CTValue, cur_func, FunctionInfo, ValueExtension};
+use crate::frontend::context::{Context, CTValue, cur_func, cur_func_mut, FunctionInfo, ValueExtension};
 use crate::frontend::Error::CannotAssignConstant;
 use crate::frontend::eval::Evaluate;
 use super::ast::CompUnit;
@@ -39,12 +39,24 @@ impl ProgramGen for FuncDef {
 
         let entry = func_data.dfg_mut().new_bb().basic_block(Some("%entry".into()));
         let func = program.new_func(func_data);
-        let mut info = FunctionInfo::new(func, entry);
+        let mut info = FunctionInfo::new(func, entry, program);
         info.push_bb(program, entry);
         context.cur_func = Some(info);
         // 进入函数
         context.enter();
+        // 先把 alloc 返回值的语句 push 上去
+        cur_func!(context).ret_value().push(program, context);
         self.block.generate(program, context)?;
+        // 最后把 end 块 push 上去
+        let end = cur_func!(context).end();
+        cur_func_mut!(context).push_bb(program, end);
+        let ret_value = cur_func!(context).new_value(program)
+            .load(cur_func!(context).ret_value())
+            .push(program, context);
+        // 返回值
+        cur_func!(context).new_value(program)
+            .ret(Some(ret_value))
+            .push(program, context);
         // 退出函数
         context.exit();
         Ok(())
@@ -156,19 +168,17 @@ impl ProgramGen for Stmt {
                 }
             }
             Stmt::Ret(exp) => {
-                let mut ret_value = exp.generate(program, context)?;
-                // 如果是alloc，先load再返回
-                if let ValueKind::Alloc(..) = cur_func!(context).value(program, ret_value).kind() {
-                    ret_value = cur_func!(context)
-                        .new_value(program)
-                        .load(ret_value)
-                        .push(program, context)
-                }
-                // 处理返回值
-                cur_func!(context)
-                    .new_value(program)
-                    .ret(Some(ret_value))
+                let ret_value = exp.generate(program, context)?.into_int(context, program);
+                // 设置返回值，并且跳转到 end 块
+                cur_func!(context).new_value(program)
+                    .store(ret_value, cur_func!(context).ret_value())
                     .push(program, context);
+                cur_func!(context).new_value(program)
+                    .jump(cur_func!(context).end())
+                    .push(program, context);
+                // 之后的内容不应继续 push 进去了，它们是 unreachable code，设置一下 unreachable 状态
+                // 当 push 下一个基本块时 unreachable 状态会被刷新
+                cur_func_mut!(context).set_unreachable();
             }
             Stmt::Exp(exp) => {
                 if let Some(exp) = exp {
@@ -179,6 +189,36 @@ impl ProgramGen for Stmt {
                 context.enter();
                 block.generate(program, context)?;
                 context.exit();
+            }
+            Stmt::If { cond, then, else_then } => {
+                let cond = cond.generate(program, context)?.into_int(context, program);
+                let then_bb = cur_func!(context).new_bb(program, Some("%if_then"));
+                let else_bb = cur_func!(context).new_bb(program, Some("%if_else"));
+                cur_func!(context)
+                    .new_value(program)
+                    .branch(cond, then_bb, else_bb)
+                    .push(program, context);
+                // 进入 then 块
+                cur_func_mut!(context).push_bb(program, then_bb);
+                then.generate(program, context)?;
+                // 最后写一段跳转到 end 块的逻辑
+                let end_bb = cur_func!(context).new_bb(program, Some("%if_end"));
+                cur_func!(context).new_value(program)
+                    .jump(end_bb)
+                    .push(program, context);
+                // 开始写 else_bb
+                cur_func_mut!(context).push_bb(program, else_bb);
+                // 如果有 else 则生成
+                if let Some(else_then) = else_then {
+                    else_then.generate(program, context)?;
+                }
+                // 也写一段跳转到 end 块的代码
+                cur_func!(context)
+                    .new_value(program)
+                    .jump(end_bb)
+                    .push(program, context);
+                // 进入 end 块
+                cur_func_mut!(context).push_bb(program, end_bb);
             }
         }
         Ok(())
@@ -206,8 +246,8 @@ impl ProgramGen for LOrExp {
                 // 利用按位运算实现布尔运算
                 // https://juejin.cn/post/7077114074177208351
                 // l && r : l | r == (l | r) | 1
-                let left = or.generate(program, context)?;
-                let right = and.generate(program, context)?;
+                let left = or.generate(program, context)?.into_int(context, program);
+                let right = and.generate(program, context)?.into_int(context, program);
                 let zero = cur_func!(context).new_value(program).integer(0);
                 let one = cur_func!(context).new_value(program).integer(1);
                 // left != 0
@@ -252,8 +292,8 @@ impl ProgramGen for LAndExp {
                 // 利用按位运算实现布尔运算
                 // https://juejin.cn/post/7077114074177208351
                 // l || r : l & r == (l | r) | 1
-                let left = and.generate(program, context)?;
-                let right = eq.generate(program, context)?;
+                let left = and.generate(program, context)?.into_int(context, program);
+                let right = eq.generate(program, context)?.into_int(context, program);
                 let zero = cur_func!(context).new_value(program).integer(0);
                 let one = cur_func!(context).new_value(program).integer(1);
                 // left != 0
@@ -298,8 +338,8 @@ impl ProgramGen for EqExp {
         Ok(match self {
             EqExp::Rel(rel) => rel.generate(program, context)?,
             EqExp::Eq(eq, op, rel) => {
-                let left = eq.generate(program, context)?;
-                let right = rel.generate(program, context)?;
+                let left = eq.generate(program, context)?.into_int(context, program);
+                let right = rel.generate(program, context)?.into_int(context, program);
                 let value = match op {
                     ast::BinaryOp::Eq => cur_func!(context).new_value(program).binary(BinaryOp::Eq, left, right),
                     ast::BinaryOp::Neq => cur_func!(context).new_value(program).binary(BinaryOp::NotEq, left, right),
@@ -320,8 +360,8 @@ impl ProgramGen for RelExp {
         Ok(match self {
             RelExp::Add(add) => add.generate(program, context)?,
             RelExp::Rel(rel, op, add) => {
-                let left = rel.generate(program, context)?;
-                let right = add.generate(program, context)?;
+                let left = rel.generate(program, context)?.into_int(context, program);
+                let right = add.generate(program, context)?.into_int(context, program);
                 let value = match op {
                     ast::BinaryOp::Lt => cur_func!(context).new_value(program).binary(BinaryOp::Lt, left, right),
                     ast::BinaryOp::Le => cur_func!(context).new_value(program).binary(BinaryOp::Le, left, right),
@@ -343,17 +383,8 @@ impl ProgramGen for AddExp {
     fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
         Ok(match self {
             AddExp::Add(add_exp, op, mul_exp) => {
-                let mut left_value = add_exp.generate(program, context)?;
-                let mut right_value = mul_exp.generate(program, context)?;
-                // 如果是alloc 就load一下
-                if let ValueKind::Alloc(..) = cur_func!(context).value(program, left_value).kind() {
-                    left_value = cur_func!(context).new_value(program).load(left_value)
-                        .push(program, context)
-                }
-                if let ValueKind::Alloc(..) = cur_func!(context).value(program, right_value).kind() {
-                    right_value = cur_func!(context).new_value(program).load(right_value)
-                        .push(program, context)
-                }
+                let left_value = add_exp.generate(program, context)?.into_int(context, program);
+                let right_value = mul_exp.generate(program, context)?.into_int(context, program);
                 let value = match op {
                     ast::BinaryOp::Add => {
                         cur_func!(context).new_value(program).binary(BinaryOp::Add, left_value, right_value)
@@ -381,17 +412,8 @@ impl ProgramGen for MulExp {
         Ok(match self {
             MulExp::Unary(unary) => unary.generate(program, context)?,
             MulExp::Mul(mul_exp, op, unary) => {
-                let mut left_value = mul_exp.generate(program, context)?;
-                let mut right_value = unary.generate(program, context)?;
-                // 如果是alloc 就load一下
-                if let ValueKind::Alloc(..) = cur_func!(context).value(program, left_value).kind() {
-                    left_value = cur_func!(context).new_value(program).load(left_value)
-                        .push(program, context)
-                }
-                if let ValueKind::Alloc(..) = cur_func!(context).value(program, right_value).kind() {
-                    right_value = cur_func!(context).new_value(program).load(right_value)
-                        .push(program, context)
-                }
+                let left_value = mul_exp.generate(program, context)?.into_int(context, program);
+                let right_value = unary.generate(program, context)?.into_int(context, program);
                 let value = match op {
                     ast::BinaryOp::Mul => {
                         cur_func!(context).new_value(program).binary(BinaryOp::Mul, left_value, right_value)
@@ -423,7 +445,7 @@ impl ProgramGen for UnaryExp {
                 unary.generate(program, context)
             }
             UnaryExp::UnaryOpAndExp(op, exp) => {
-                let value = exp.generate(program, context)?;
+                let value = exp.generate(program, context)?.into_int(context, program);
                 let zero = cur_func!(context).new_value(program).integer(0);
                 let value = match op {
                     UnaryOp::Neg => cur_func!(context).new_value(program).binary(BinaryOp::Sub, zero, value),

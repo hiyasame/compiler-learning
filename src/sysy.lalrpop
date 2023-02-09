@@ -30,10 +30,27 @@ FuncType: FuncType = "int" => FuncType::Int;
 Block: Block = "{" <block_items: (BlockItem)*> "}" => Block { block_items };
 
 Stmt: Stmt = {
+    MatchedStmt => <>,
+    OpenStmt => <>
+}
+
+// 能完全匹配到 else 的 if 语句 (嵌套在 if 里面的语句中的 if 也需要匹配到 else)
+// 或者其他的非条件语句
+MatchedStmt: Stmt = {
+    "if" "(" <cond: Exp> ")" <then: MatchedStmt> "else" <else_then: MatchedStmt> => Stmt::If { cond, then: Box::new(then), else_then: Some(Box::new(else_then)) },
     <lval: LVal> "=" <exp: Exp> ";" => Stmt::Assign(lval, exp),
     <exp: (Exp)?> ";" => Stmt::Exp(exp),
     <block: Block> => Stmt::Block(block),
     "return" <exp: Exp> ";" => Stmt::Ret(exp),
+}
+
+// 不能完全匹配到 else 的 if 语句
+OpenStmt: Stmt = {
+    // 匹配不到 else 的语句 那么 then 里面是不是 MatchedStmt 都无所谓了
+    "if" "(" <cond: Exp> ")" <then: Stmt> => Stmt::If { cond, then: Box::new(then), else_then: None },
+    // 匹配得到 else 的语句 既然能匹配到 else 那么 then 就必须是一个 MatchedStmt
+    // else 块里的语句就必须是 OpenStmt 了，因为如果是 MatchedStmt 的话这个语句就也应算作 MatchedStmt 了
+    "if" "(" <cond: Exp> ")" <then: MatchedStmt> "else" <else_then: OpenStmt> => Stmt::If { cond, then: Box::new(then), else_then: Some(Box::new(else_then)) }
 }
 
 Exp: Exp = <lor_exp: LOrExp> => Exp { lor_exp };
