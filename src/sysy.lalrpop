@@ -38,9 +38,12 @@ Stmt: Stmt = {
 // 或者其他的非条件语句
 MatchedStmt: Stmt = {
     "if" "(" <cond: Exp> ")" <then: MatchedStmt> "else" <else_then: MatchedStmt> => Stmt::If { cond, then: Box::new(then), else_then: Some(Box::new(else_then)) },
+    "while" "(" <cond: Exp> ")" <stmt: MatchedStmt> => Stmt::While { cond, stmt: Box::new(stmt) },
     <lval: LVal> "=" <exp: Exp> ";" => Stmt::Assign(lval, exp),
     <exp: (Exp)?> ";" => Stmt::Exp(exp),
     <block: Block> => Stmt::Block(block),
+    "break" ";" => Stmt::Break,
+    "continue" ";" => Stmt::Continue,
     "return" <exp: Exp> ";" => Stmt::Ret(exp),
 }
 
@@ -50,7 +53,8 @@ OpenStmt: Stmt = {
     "if" "(" <cond: Exp> ")" <then: Stmt> => Stmt::If { cond, then: Box::new(then), else_then: None },
     // 匹配得到 else 的语句 既然能匹配到 else 那么 then 就必须是一个 MatchedStmt
     // else 块里的语句就必须是 OpenStmt 了，因为如果是 MatchedStmt 的话这个语句就也应算作 MatchedStmt 了
-    "if" "(" <cond: Exp> ")" <then: MatchedStmt> "else" <else_then: OpenStmt> => Stmt::If { cond, then: Box::new(then), else_then: Some(Box::new(else_then)) }
+    "if" "(" <cond: Exp> ")" <then: MatchedStmt> "else" <else_then: OpenStmt> => Stmt::If { cond, then: Box::new(then), else_then: Some(Box::new(else_then)) },
+    "while" "(" <cond: Exp> ")" <stmt: OpenStmt> => Stmt::While { cond, stmt: Box::new(stmt) },
 }
 
 Exp: Exp = <lor_exp: LOrExp> => Exp { lor_exp };

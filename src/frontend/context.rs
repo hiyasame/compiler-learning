@@ -33,6 +33,7 @@ pub struct FunctionInfo {
     cur: BasicBlock,
     ret_value: Option<Value>,
     end_bb: BasicBlock,
+    loops: Vec<LoopInfo>,
     // 为 true 时表明这段代码是 unreachable 的，不应当继续插入代码
     unreachable: bool
 }
@@ -122,6 +123,7 @@ impl FunctionInfo {
                 .dfg_mut()
                 .new_bb()
                 .basic_block(Some("%end".into())),
+            loops: vec![],
             unreachable: false
         }
     }
@@ -136,6 +138,10 @@ impl FunctionInfo {
 
     pub fn func(&self) -> Function {
         self.func
+    }
+    
+    pub fn loops(&mut self) -> &mut Vec<LoopInfo> {
+        &mut self.loops
     }
     
     pub fn set_unreachable(&mut self) {
@@ -222,6 +228,25 @@ impl CTValue {
             Self::Runtime(value) => *value,
             _ => unreachable!()
         }
+    }
+}
+
+pub struct LoopInfo {
+    entry_bb: BasicBlock,
+    end_bb: BasicBlock
+}
+
+impl LoopInfo {
+    pub fn new(entry_bb: BasicBlock, end_bb: BasicBlock) -> Self {
+        Self { entry_bb, end_bb }
+    }
+    
+    pub fn entry(&self) -> BasicBlock {
+        self.entry_bb
+    }
+
+    pub fn end(&self) -> BasicBlock {
+        self.end_bb
     }
 }
 

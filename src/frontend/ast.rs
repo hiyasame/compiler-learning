@@ -22,7 +22,10 @@ pub enum Stmt {
     // 单个 ; 也是合法语句
     Exp(Option<Exp>),
     Block(Block),
-    If { cond: Exp, then: Box<Stmt>, else_then: Option<Box<Stmt>> }
+    If { cond: Exp, then: Box<Stmt>, else_then: Option<Box<Stmt>> },
+    While { cond: Exp, stmt: Box<Stmt> },
+    Break,
+    Continue
 }
 
 #[derive(Debug)]

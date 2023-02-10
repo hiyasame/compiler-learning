@@ -3,7 +3,7 @@ use koopa::ir::{BinaryOp, FunctionData, Program, Type, Value};
 use koopa::ir::builder::{BasicBlockBuilder, GlobalInstBuilder, LocalInstBuilder, ValueBuilder};
 use crate::frontend::ast;
 use crate::frontend::ast::{AddExp, Block, BlockItem, ConstDecl, ConstDef, ConstExp, ConstInitVal, Decl, EqExp, Exp, FuncDef, FuncType, InitVal, LAndExp, LOrExp, MulExp, PrimaryExp, RelExp, Stmt, UnaryExp, UnaryOp, VarDecl, VarDef};
-use crate::frontend::context::{Context, CTValue, cur_func, cur_func_mut, FunctionInfo, ValueExtension};
+use crate::frontend::context::{Context, CTValue, cur_func, cur_func_mut, FunctionInfo, LoopInfo, ValueExtension};
 use crate::frontend::Error::CannotAssignConstant;
 use crate::frontend::eval::Evaluate;
 use super::ast::CompUnit;
@@ -219,6 +219,46 @@ impl ProgramGen for Stmt {
                     .push(program, context);
                 // 进入 end 块
                 cur_func_mut!(context).push_bb(program, end_bb);
+            }
+            Stmt::While { cond, stmt } => {
+                let while_entry = cur_func!(context).new_bb(program, Some("%while_entry"));
+                let while_body = cur_func!(context).new_bb(program, Some("%while_body"));
+                let while_end = cur_func!(context).new_bb(program, Some("%while_end"));
+                let loop_info = LoopInfo::new(while_entry, while_end);
+
+                cur_func!(context).new_value(program)
+                    .jump(while_entry)
+                    .push(program, context);
+                cur_func_mut!(context).push_bb(program, while_entry);
+
+                // 这一步要在进入while_entry之后
+                let cond = cond.generate(program, context)?.into_int(context, program);
+
+                cur_func!(context).new_value(program)
+                    .branch(cond, while_body, while_end)
+                    .push(program, context);
+                cur_func_mut!(context).push_bb(program, while_body);
+                // 在进到 body 之后再把 loop info push 上去
+                cur_func_mut!(context).loops().push(loop_info);
+                stmt.generate(program, context)?;
+                // body 里面的语句满了就出栈
+                cur_func_mut!(context).loops().pop();
+                cur_func!(context).new_value(program)
+                    .jump(while_entry)
+                    .push(program, context);
+                cur_func_mut!(context).push_bb(program, while_end);
+            },
+            Stmt::Break => {
+                cur_func!(context).new_value(program)
+                    .jump(cur_func_mut!(context).loops().last().unwrap().end())
+                    .push(program, context);
+                cur_func_mut!(context).set_unreachable();
+            },
+            Stmt::Continue => {
+                cur_func!(context).new_value(program)
+                    .jump(cur_func_mut!(context).loops().last().unwrap().entry())
+                    .push(program, context);
+                cur_func_mut!(context).set_unreachable()
             }
         }
         Ok(())
