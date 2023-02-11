@@ -14,18 +14,42 @@ match {
   _
 }
 
-// 定义 CompUnit, 其返回值类型为 String
-// parser 在解析完成后的行为是返回 FuncDef 的值
-pub CompUnit: CompUnit = <func_def: FuncDef> => CompUnit { <> };
+pub CompUnit: CompUnit = <global_defs: GlobalDef*> => CompUnit { global_defs };
 
-// 同上, 不解释
+GlobalDef: GlobalDef = {
+    FuncDef => GlobalDef::Func(<>),
+    Decl => GlobalDef::Decl(<>)
+}
+
+FuncDefHead: (FuncType, String) = {
+    "int" <ident: Ident> "(" => (FuncType::Int, ident),
+    "void" <ident: Ident> "(" => (FuncType::Void, ident)
+}
+
 FuncDef: FuncDef = {
-  <func_type: FuncType> <id: Ident> "(" ")" <block: Block> => {
-    FuncDef { func_type, ident: id, block }
+  <head: FuncDefHead> <params: (<FuncFParams>)?> ")" <block: Block> => {
+    let (func_type, id) = head;
+    FuncDef { func_type, ident: id, block, params }
   }
 }
 
-FuncType: FuncType = "int" => FuncType::Int;
+FuncType: FuncType = {
+    "int" => FuncType::Int,
+    "void" => FuncType::Void
+}
+
+// FuncFParams ::= FuncFParam {"," FuncFParam};
+FuncFParams: FuncFParams = <param0: FuncFParam> <mut params: ("," <FuncFParam>)*> => {
+        params.insert(0, param0);
+        FuncFParams { params }
+};
+
+FuncRParams: Vec<Exp> = <param0: Exp> <mut params: ("," <Exp>)*> => {
+    params.insert(0, param0);
+    params
+};
+
+FuncFParam: FuncFParam = "int" <ident: Ident> => FuncFParam { ident };
 
 Block: Block = "{" <block_items: (BlockItem)*> "}" => Block { block_items };
 
@@ -63,7 +87,10 @@ UnaryExp: UnaryExp = {
     <exp: PrimaryExp> => UnaryExp::PrimaryExpression(exp),
     // + 的一元运算什么都不做
     "+" <exp: UnaryExp> => UnaryExp::UnaryExpression(Box::new(exp)),
-    <op: UnaryOp> <exp: UnaryExp> => UnaryExp::UnaryOpAndExp(op, Box::new(exp))
+    <op: UnaryOp> <exp: UnaryExp> => UnaryExp::UnaryOpAndExp(op, Box::new(exp)),
+    <ident: Ident> "(" <params: (<FuncRParams>)?> ")" => {
+        UnaryExp::FunctionCall(ident, params.unwrap_or(vec![]))
+    }
 }
 
 UnaryOp: UnaryOp = {
@@ -164,13 +191,11 @@ Decl: Decl = {
 }
 
 ConstDecl: ConstDecl = {
-    "const" BType <def0: ConstDef> <mut constdef: ("," <ConstDef>)*> ";" => {
+    "const" "int" <def0: ConstDef> <mut constdef: ("," <ConstDef>)*> ";" => {
         constdef.insert(0, def0);
         ConstDecl { const_defs: constdef }
      }
 }
-
-BType: String = "int" => <>.to_string();
 
 ConstDef: ConstDef = {
     <ident: Ident> "=" <val: ConstInitVal> => ConstDef { ident, val }
@@ -189,7 +214,7 @@ LVal: LVal = <ident: Ident> => LVal { ident };
 
 ConstExp: ConstExp = <exp: Exp> => ConstExp { exp };
 
-VarDecl: VarDecl = BType <def0: VarDef> <mut defs: ("," <VarDef>)*> ";" => {
+VarDecl: VarDecl = "int" <def0: VarDef> <mut defs: ("," <VarDef>)*> ";" => {
     defs.insert(0, def0);
     VarDecl { defs }
 };

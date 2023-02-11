@@ -1,5 +1,15 @@
+int x, y;
+
+int t() {
+  x = x + 1;
+  return 1;
+}
+
+int f() {
+  y = y + 1;
+  return 0;
+}
+
 int main() {
-  int i = 0;
-  while (i < 10) i = i + 1;
-  return i;
+  return t() || f();
 }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use koopa::ir::{BasicBlock, Function, Program, Type, TypeKind, Value, ValueKind};
-use koopa::ir::builder::{BasicBlockBuilder, LocalBuilder, LocalInstBuilder};
+use koopa::ir::builder::{BasicBlockBuilder, LocalBuilder, LocalInstBuilder, ValueBuilder};
 use koopa::ir::entities::ValueData;
 use super::{Result, Error};
 
@@ -8,7 +8,9 @@ use super::{Result, Error};
 pub struct Context {
     pub cur_func: Option<FunctionInfo>,
     // 符号表
-    pub vals: Vec<HashMap<String, CTValue>>
+    pub vals: Vec<HashMap<String, CTValue>>,
+    // 函数表
+    pub funcs: HashMap<String, Function>
 }
 
 /// Returns a reference to the current function information.
@@ -42,7 +44,9 @@ impl Context {
     pub fn new() -> Self {
         Self {
             cur_func: None,
-            vals: vec![HashMap::new()]
+            // global
+            vals: vec![HashMap::new()],
+            funcs: HashMap::new()
         }
     }
 
@@ -62,11 +66,12 @@ impl Context {
     }
 
     /// Inserts a new value to the current scope.
-    pub fn new_value(&mut self, id: String, value: CTValue) -> Result<()> {
-        // let is_global = self.is_global();
+    pub fn new_ct_value(&mut self, id: String, value: CTValue) -> Result<()> {
+        let is_global = self.is_global();
         let cur = self.vals.last_mut().unwrap();
-        if cur.contains_key(&id) {
-            // || (is_global && self.funcs.contains_key(&id))
+        if cur.contains_key(&id)
+            // 全局变量 且与方法重名
+            || (is_global && self.funcs.contains_key(&id)) {
             Err(Error::DuplicatedDef)
         } else {
             cur.insert(id, value);
@@ -86,17 +91,30 @@ impl Context {
         Err(Error::SymbolNotFound)
     }
 
-    pub fn value_test(&self, id: &str, program: &mut Program) -> Result<CTValue> {
-        let mut cur = self.vals.len() as i32 - 1;
-        while cur >= 0 {
-            if let Some(value) = self.vals[cur as usize].get(id) {
-                println!("{:?}", self.vals);
-                println!("{}: {:?}", id, cur_func!(self).value(program, value.as_runtime()));
-                return Ok(value.clone());
-            }
-            cur -= 1;
+    pub fn function(&self, id: &str) -> Result<&Function> {
+        self.funcs.get(id).ok_or(Error::SymbolNotFound)
+    }
+
+    pub fn ty(&self, program: &Program, value: Value) -> Type {
+        if value.is_global() {
+            program.borrow_value(value).ty().clone()
+        } else {
+            program
+                .func(cur_func!(self).func())
+                .dfg()
+                .value(value)
+                .ty()
+                .clone()
         }
-        Err(Error::SymbolNotFound)
+    }
+
+    pub fn new_func(&mut self, id: &str, func: Function) -> Result<()> {
+        if self.funcs.contains_key(id) || self.vals.first().unwrap().contains_key(id) {
+            Err(Error::DuplicatedDef)
+        } else {
+            self.funcs.insert(id.into(), func);
+            Ok(())
+        }
     }
 }
 
@@ -132,14 +150,14 @@ impl FunctionInfo {
         self.end_bb
     }
 
-    pub fn ret_value(&self) -> Value {
-        self.ret_value.unwrap()
+    pub fn ret_value(&self) -> Option<Value> {
+        self.ret_value
     }
 
     pub fn func(&self) -> Function {
         self.func
     }
-    
+
     pub fn loops(&mut self) -> &mut Vec<LoopInfo> {
         &mut self.loops
     }
@@ -240,7 +258,7 @@ impl LoopInfo {
     pub fn new(entry_bb: BasicBlock, end_bb: BasicBlock) -> Self {
         Self { entry_bb, end_bb }
     }
-    
+
     pub fn entry(&self) -> BasicBlock {
         self.entry_bb
     }
@@ -263,11 +281,17 @@ impl ValueExtension for Value {
 
     fn into_int(self, context: &mut Context, program: &mut Program) -> Value {
         let mut value = self;
-        if let ValueKind::Alloc(..) = cur_func!(context).value(program, value).kind() {
+        let value_data = if value.is_global() {
+            program.borrow_value(value).clone()
+        } else {
+            cur_func!(context).value(program, value)
+        };
+        if matches!(&value_data.kind(), ValueKind::Alloc(..))
+            || matches!(&value_data.kind(), ValueKind::GlobalAlloc(..)) {
             value = cur_func!(context)
                 .new_value(program)
                 .load(value)
-                .push(program, context)
+                .push(program, context);
         }
         value
     }

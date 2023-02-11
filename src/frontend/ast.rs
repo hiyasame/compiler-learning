@@ -1,6 +1,12 @@
 #[derive(Debug)]
 pub struct CompUnit {
-    pub func_def: FuncDef,
+    pub global_defs: Vec<GlobalDef>,
+}
+
+#[derive(Debug)]
+pub enum GlobalDef {
+    Func(FuncDef),
+    Decl(Decl)
 }
 
 #[derive(Debug)]
@@ -8,11 +14,23 @@ pub struct FuncDef {
     pub func_type: FuncType,
     pub ident: String,
     pub block: Block,
+    pub params: Option<FuncFParams>
 }
 
 #[derive(Debug)]
 pub enum FuncType {
-    Int
+    Int,
+    Void
+}
+
+#[derive(Debug, Clone)]
+pub struct FuncFParams {
+    pub params: Vec<FuncFParam>
+}
+
+#[derive(Debug, Clone)]
+pub struct FuncFParam {
+    pub ident: String
 }
 
 #[derive(Debug)]
@@ -28,23 +46,24 @@ pub enum Stmt {
     Continue
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Exp {
     pub lor_exp: LOrExp
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PrimaryExp {
     Expression(Box<Exp>),
     LValue(LVal),
     Number(i32)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum UnaryExp {
     PrimaryExpression(PrimaryExp),
     UnaryExpression(Box<UnaryExp>),
-    UnaryOpAndExp(UnaryOp, Box<UnaryExp>)
+    UnaryOpAndExp(UnaryOp, Box<UnaryExp>),
+    FunctionCall(String, Vec<Exp>)
 }
 
 #[derive(Debug, Clone)]
@@ -55,7 +74,7 @@ pub enum UnaryOp {
     Not
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BinaryOp {
     // +
     Add,
@@ -82,38 +101,38 @@ pub enum BinaryOp {
 }
 
 // MulExp ::= UnaryExp | MulExp ("*" | "/" | "%") UnaryExp;
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum MulExp {
     Unary(UnaryExp),
     Mul(Box<MulExp>, BinaryOp, UnaryExp)
 }
 
 // AddExp ::= MulExp | AddExp ("+" | "-") MulExp;
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AddExp {
     Mul(MulExp),
     Add(Box<AddExp>, BinaryOp, MulExp)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RelExp {
     Add(AddExp),
     Rel(Box<RelExp>, BinaryOp, AddExp)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum EqExp {
     Rel(RelExp),
     Eq(Box<EqExp>, BinaryOp, RelExp)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum LAndExp {
     Eq(EqExp),
     And(Box<LAndExp>, EqExp)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum LOrExp {
     And(LAndExp),
     Or(Box<LOrExp>, LAndExp)
@@ -152,7 +171,7 @@ pub enum BlockItem {
     Statement(Stmt)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LVal {
     pub ident: String
 }
@@ -173,8 +192,14 @@ pub enum VarDef {
     Init { ident: String, val: InitVal }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct InitVal {
     pub exp: Exp
+}
+
+impl InitVal {
+    pub fn into_const(self) -> ConstInitVal {
+        ConstInitVal { exp: ConstExp { exp: self.exp } }
+    }
 }
 

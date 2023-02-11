@@ -123,7 +123,8 @@ impl Evaluate for UnaryExp {
                     UnaryOp::Not => !value
                 }
             }
-            Self::PrimaryExpression(exp) => exp.eval(program, context)?
+            Self::PrimaryExpression(exp) => exp.eval(program, context)?,
+            Self::FunctionCall(..) => panic!("function call in constant val evaluation.")
         })
     }
 }

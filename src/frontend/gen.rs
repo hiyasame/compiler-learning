@@ -1,8 +1,8 @@
 use koopa::back::KoopaGenerator;
-use koopa::ir::{BinaryOp, FunctionData, Program, Type, Value};
+use koopa::ir::{BinaryOp, FunctionData, Program, Type, TypeKind, Value};
 use koopa::ir::builder::{BasicBlockBuilder, GlobalInstBuilder, LocalInstBuilder, ValueBuilder};
-use crate::frontend::ast;
-use crate::frontend::ast::{AddExp, Block, BlockItem, ConstDecl, ConstDef, ConstExp, ConstInitVal, Decl, EqExp, Exp, FuncDef, FuncType, InitVal, LAndExp, LOrExp, MulExp, PrimaryExp, RelExp, Stmt, UnaryExp, UnaryOp, VarDecl, VarDef};
+use crate::frontend::{ast, Error};
+use crate::frontend::ast::{AddExp, Block, BlockItem, ConstDecl, ConstDef, ConstExp, ConstInitVal, Decl, EqExp, Exp, FuncDef, FuncFParam, FuncFParams, FuncType, GlobalDef, InitVal, LAndExp, LOrExp, MulExp, PrimaryExp, RelExp, Stmt, UnaryExp, UnaryOp, VarDecl, VarDef};
 use crate::frontend::context::{Context, CTValue, cur_func, cur_func_mut, FunctionInfo, LoopInfo, ValueExtension};
 use crate::frontend::Error::CannotAssignConstant;
 use crate::frontend::eval::Evaluate;
@@ -26,7 +26,48 @@ impl ProgramGen for CompUnit {
     type Out = ();
 
     fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
-        self.func_def.generate(program, context)?;
+        let mut new_decl = |name, params_ty, ret_ty| {
+            context
+                .new_func(
+                    name,
+                    program.new_func(FunctionData::new_decl(
+                        format!("@{}", name),
+                        params_ty,
+                        ret_ty,
+                    )),
+                )
+                .unwrap();
+        };
+
+        // generate SysY library function declarations
+        new_decl("getint", vec![], Type::get_i32());
+        new_decl("getch", vec![], Type::get_i32());
+        new_decl(
+            "getarray",
+            vec![Type::get_pointer(Type::get_i32())],
+            Type::get_i32(),
+        );
+        new_decl("putint", vec![Type::get_i32()], Type::get_unit());
+        new_decl("putch", vec![Type::get_i32()], Type::get_unit());
+        new_decl(
+            "putarray",
+            vec![Type::get_i32(), Type::get_pointer(Type::get_i32())],
+            Type::get_unit(),
+        );
+        new_decl("starttime", vec![], Type::get_unit());
+        new_decl("stoptime", vec![], Type::get_unit());
+
+        for def in &self.global_defs {
+            match def {
+                GlobalDef::Decl(decl) => {
+                    // 全局变量
+                    decl.generate(program, context)?;
+                }
+                GlobalDef::Func(func) => {
+                    func.generate(program, context)?;
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -35,30 +76,65 @@ impl ProgramGen for FuncDef {
     type Out = ();
 
     fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
-        let mut func_data = FunctionData::with_param_names(format!("@{}", self.ident), vec![], self.func_type.generate(program, context)?);
+        let params_ty = if let Some(FuncFParams { params }) = &self.params {
+            params.iter().map(|_| Type::get_i32()).collect()
+        } else {
+            vec![]
+        };
+        let mut func_data = FunctionData::new(format!("@{}", self.ident), params_ty, self.func_type.generate(program, context)?);
+        // 读出参数
+        let params = func_data.params().to_owned();
 
         let entry = func_data.dfg_mut().new_bb().basic_block(Some("%entry".into()));
         let func = program.new_func(func_data);
         let mut info = FunctionInfo::new(func, entry, program);
         info.push_bb(program, entry);
+        context.new_func(&self.ident, info.func())?;
         context.cur_func = Some(info);
+
         // 进入函数
         context.enter();
         // 先把 alloc 返回值的语句 push 上去
-        cur_func!(context).ret_value().push(program, context);
+        let ret_value = cur_func!(context).ret_value();
+        // 有返回值就先 alloc
+        if let Some(ret_value) = ret_value {
+            ret_value.push(program, context);
+        }
+        // 将参数推进当前作用域变量表
+        for (v, param) in params.iter()
+            .zip(&self.params.as_ref().map(|it| it.params.clone()).unwrap_or_default()) {
+            let ty = program.func(func).dfg().value(*v).ty().clone();
+            let alloc = cur_func!(context).new_value(program)
+                .alloc(ty)
+                .push(program, context);
+            cur_func!(context).new_value(program)
+                .store(*v, alloc)
+                .push(program, context);
+            context.new_ct_value(param.ident.to_string(), CTValue::Runtime(alloc))?;
+        }
+
         self.block.generate(program, context)?;
         // 最后把 end 块 push 上去
         let end = cur_func!(context).end();
-        cur_func_mut!(context).push_bb(program, end);
-        let ret_value = cur_func!(context).new_value(program)
-            .load(cur_func!(context).ret_value())
-            .push(program, context);
-        // 返回值
-        cur_func!(context).new_value(program)
-            .ret(Some(ret_value))
-            .push(program, context);
+        // 如果有返回值就返回
+        if let Some(ret_value) = ret_value {
+            cur_func_mut!(context).push_bb(program, end);
+            let ret_value = cur_func!(context).new_value(program)
+                .load(ret_value)
+                .push(program, context);
+            // 返回值
+            cur_func!(context).new_value(program)
+                .ret(Some(ret_value))
+                .push(program, context);
+        } else {
+            cur_func!(context).new_value(program)
+                .ret(None)
+                .push(program, context);
+        }
         // 退出函数
         context.exit();
+        // 清除状态
+        context.cur_func = None;
         Ok(())
     }
 }
@@ -68,7 +144,8 @@ impl ProgramGen for FuncType {
 
     fn generate(&self, _program: &mut Program, _context: &mut Context) -> Result<Self::Out> {
         Ok(match self {
-            Self::Int => Type::get_i32()
+            Self::Int => Type::get_i32(),
+            Self::Void => Type::get_unit()
         })
     }
 }
@@ -131,7 +208,7 @@ impl ProgramGen for ConstDef {
 
     fn generate(&self, program: &mut Program, context: &mut Context) -> Result<Self::Out> {
         let value = CTValue::Const(self.val.generate(program, context)?);
-        context.new_value(self.ident.clone(), value)
+        context.new_ct_value(self.ident.clone(), value)
     }
 }
 
@@ -169,10 +246,13 @@ impl ProgramGen for Stmt {
             }
             Stmt::Ret(exp) => {
                 let ret_value = exp.generate(program, context)?.into_int(context, program);
-                // 设置返回值，并且跳转到 end 块
-                cur_func!(context).new_value(program)
-                    .store(ret_value, cur_func!(context).ret_value())
-                    .push(program, context);
+                let return_v_alloc = cur_func!(context).ret_value();
+                if let Some(return_v_alloc) = return_v_alloc {
+                    // 设置返回值，并且跳转到 end 块
+                    cur_func!(context).new_value(program)
+                        .store(ret_value, return_v_alloc)
+                        .push(program, context);
+                }
                 cur_func!(context).new_value(program)
                     .jump(cur_func!(context).end())
                     .push(program, context);
@@ -283,38 +363,63 @@ impl ProgramGen for LOrExp {
                 and.generate(program, context)?
             }
             LOrExp::Or(or, and) => {
+
+                let left_bb = cur_func!(context).new_bb(program, Some("%lor_lhs"));
+                let right_bb = cur_func!(context).new_bb(program, Some("%lor_rhs"));
+                let end_bb = cur_func!(context).new_bb(program, Some("%lor_end"));
+
+                cur_func!(context).new_value(program)
+                    .jump(left_bb)
+                    .push(program, context);
+
+                cur_func_mut!(context).push_bb(program, left_bb);
+
+                // 先把结果给alloc出来
+                let ret_alloc = cur_func!(context).new_value(program)
+                    .alloc(Type::get_i32())
+                    .push(program, context);
+
                 // 利用按位运算实现布尔运算
                 // https://juejin.cn/post/7077114074177208351
                 // l && r : l | r == (l | r) | 1
                 let left = or.generate(program, context)?.into_int(context, program);
-                let right = and.generate(program, context)?.into_int(context, program);
                 let zero = cur_func!(context).new_value(program).integer(0);
-                let one = cur_func!(context).new_value(program).integer(1);
+                // 先执行左，如果左值为真那就不用执行右值运算
                 // left != 0
                 let left = cur_func!(context)
                     .new_value(program)
                     .binary(BinaryOp::NotEq, left, zero)
                     .push(program ,context);
+                cur_func!(context).new_value(program)
+                    .store(left, ret_alloc)
+                    .push(program, context);
+                // left 为真则跳转到 end，不为真则跳转到 right
+                cur_func!(context).new_value(program)
+                    .branch(left, end_bb, right_bb)
+                    .push(program, context);
+
+                cur_func_mut!(context).push_bb(program, right_bb);
+
+                let right = and.generate(program, context)?.into_int(context, program);
+
                 // right != 0
                 let right = cur_func!(context)
                     .new_value(program)
                     .binary(BinaryOp::NotEq, right, zero)
                     .push(program, context);
-                // l | r
-                let l_or_r = cur_func!(context)
-                    .new_value(program)
-                    .binary(BinaryOp::Or, left, right)
+                cur_func!(context).new_value(program)
+                    .store(right, ret_alloc)
                     .push(program, context);
-                // (l | r) | 1
-                let l_or_r_or_1 = cur_func!(context)
-                    .new_value(program)
-                    .binary(BinaryOp::Or, l_or_r, one)
+                // 跳转到 end
+                cur_func!(context).new_value(program)
+                    .jump(end_bb)
                     .push(program, context);
-                let value = cur_func!(context)
-                    .new_value(program)
-                    .binary(BinaryOp::Eq, l_or_r, l_or_r_or_1)
-                    .push(program, context);
-                value
+
+                cur_func_mut!(context).push_bb(program, end_bb);
+                // 把结果load出来
+                cur_func!(context).new_value(program)
+                    .load(ret_alloc)
+                    .push(program, context)
             }
         })
     }
@@ -329,42 +434,62 @@ impl ProgramGen for LAndExp {
         Ok(match self {
             LAndExp::Eq(eq) => eq.generate(program, context)?,
             LAndExp::And(and, eq) => {
+                let left_bb = cur_func!(context).new_bb(program, Some("%land_lhs"));
+                let right_bb = cur_func!(context).new_bb(program, Some("%land_rhs"));
+                let end_bb = cur_func!(context).new_bb(program, Some("%land_end"));
+
+                cur_func!(context).new_value(program)
+                    .jump(left_bb)
+                    .push(program, context);
+
+                cur_func_mut!(context).push_bb(program, left_bb);
+
+                // 先把结果给alloc出来
+                let ret_alloc = cur_func!(context).new_value(program)
+                    .alloc(Type::get_i32())
+                    .push(program, context);
+
                 // 利用按位运算实现布尔运算
                 // https://juejin.cn/post/7077114074177208351
-                // l || r : l & r == (l | r) | 1
+                // l && r : l | r == (l | r) | 1
                 let left = and.generate(program, context)?.into_int(context, program);
-                let right = eq.generate(program, context)?.into_int(context, program);
                 let zero = cur_func!(context).new_value(program).integer(0);
-                let one = cur_func!(context).new_value(program).integer(1);
+                // 先执行左，如果左值为真那就不用执行右值运算
                 // left != 0
                 let left = cur_func!(context)
                     .new_value(program)
                     .binary(BinaryOp::NotEq, left, zero)
+                    .push(program ,context);
+                cur_func!(context).new_value(program)
+                    .store(left, ret_alloc)
                     .push(program, context);
+                // left 为真则跳转到 end，不为真则跳转到 right
+                cur_func!(context).new_value(program)
+                    .branch(left, right_bb, end_bb)
+                    .push(program, context);
+
+                cur_func_mut!(context).push_bb(program, right_bb);
+
+                let right = eq.generate(program, context)?.into_int(context, program);
+
                 // right != 0
                 let right = cur_func!(context)
                     .new_value(program)
                     .binary(BinaryOp::NotEq, right, zero)
                     .push(program, context);
-                let l_and_r = cur_func!(context)
-                    .new_value(program)
-                    .binary(BinaryOp::And, left, right)
+                cur_func!(context).new_value(program)
+                    .store(right, ret_alloc)
                     .push(program, context);
-                // l | r
-                let l_or_r = cur_func!(context)
-                    .new_value(program)
-                    .binary(BinaryOp::Or, left, right)
+                // 跳转到 end
+                cur_func!(context).new_value(program)
+                    .jump(end_bb)
                     .push(program, context);
-                // (l | r) | 1
-                let l_or_r_or_1 = cur_func!(context)
-                    .new_value(program)
-                    .binary(BinaryOp::Or, l_or_r, one)
-                    .push(program, context);
-                let value = cur_func!(context)
-                    .new_value(program)
-                    .binary(BinaryOp::Eq, l_and_r, l_or_r_or_1)
-                    .push(program, context);
-                value
+
+                cur_func_mut!(context).push_bb(program, end_bb);
+                // 把结果load出来
+                cur_func!(context).new_value(program)
+                    .load(ret_alloc)
+                    .push(program, context)
             }
         })
     }
@@ -493,6 +618,39 @@ impl ProgramGen for UnaryExp {
                 };
                 cur_func!(context).push_inst(program, value);
                 Ok(value)
+            },
+            UnaryExp::FunctionCall(ident, params) => {
+                let mut value_params = vec![];
+                for p in params {
+                    let value = p.generate(program, context)?
+                        .into_int(context, program);
+                    // 如果是指针的话自动取值
+                    value_params.push(value);
+                }
+                let (params_ty, is_void) = {
+                    let func = context.function(ident)?;
+                    match program.func(*func).ty().kind() {
+                        TypeKind::Function(params, ret) => (params.clone(), ret.is_unit()),
+                        _ => unreachable!(),
+                    }
+                };
+                let args = params.iter()
+                    .map(|exp| exp.generate(program, context).map(|value| value.into_int(context, program)).unwrap())
+                    .collect::<Vec<Value>>();
+                // check argument types
+                if params_ty.len() != args.len() {
+                    return Err(Error::ArgMismatch);
+                }
+                for (param_ty, arg) in params_ty.iter().zip(&args) {
+                    if param_ty != &context.ty(program, *arg) {
+                        return Err(Error::ArgMismatch);
+                    }
+                }
+                Ok(
+                    cur_func!(context).new_value(program)
+                        .call(*context.function(ident)?, value_params)
+                        .push(program, context)
+                )
             }
         }
     }
@@ -542,8 +700,6 @@ impl ProgramGen for VarDef {
             VarDef::NotInit { ident } => {
                 let value = if context.is_global() {
                     let value = program.new_value().zero_init(Type::get_i32());
-                    program.borrow_value(value);
-                    // global的变量不用push
                     program.new_value()
                         .global_alloc(value)
                 } else {
@@ -552,24 +708,28 @@ impl ProgramGen for VarDef {
                         .alloc(Type::get_i32())
                         .push(program, context)
                 };
-                context.new_value(ident.to_string(), CTValue::Runtime(value))?;
+                context.new_ct_value(ident.to_string(), CTValue::Runtime(value))?;
             }
             VarDef::Init { ident, val } => {
-                let val = val.generate(program, context)?;
                 let value = if context.is_global() {
-                    program.new_value().global_alloc(val)
+                    let eval = val.clone().into_const().generate(program, context)?;
+                    let eval = program.new_value()
+                        .integer(eval);
+                    program.new_value()
+                        .global_alloc(eval)
                 } else {
+                    let val = val.generate(program, context)?;
                     let alloc = cur_func!(context)
-                        .new_value(program)
-                        .alloc(Type::get_i32())
-                        .push(program, context);
-                    cur_func!(context)
-                        .new_value(program)
-                        .store(val, alloc)
-                        .push(program, context);
-                    alloc
+                            .new_value(program)
+                            .alloc(Type::get_i32())
+                            .push(program, context);
+                        cur_func!(context)
+                            .new_value(program)
+                            .store(val, alloc)
+                            .push(program, context);
+                        alloc
                 };
-                context.new_value(ident.to_string(), CTValue::Runtime(value))?;
+                context.new_ct_value(ident.to_string(), CTValue::Runtime(value))?;
             }
         }
         Ok(())
